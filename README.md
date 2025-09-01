@@ -12,6 +12,3 @@ It is a PyTorch-based implementation that demonstrates high-quality upscaling an
 - Evaluation with PSNR and SSIM metrics
 - Save and load model checkpoints
 - Example scripts for training and inference
-
-
-
