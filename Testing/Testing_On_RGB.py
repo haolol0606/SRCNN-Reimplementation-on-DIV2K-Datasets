@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import os
 import torchvision.transforms as transforms
 from torchvision.transforms import InterpolationMode
-from utils import calc_psnr
+from Training.utils import calc_psnr
 
 # Define the SRCNN Model
 class SRCNN(nn.Module):

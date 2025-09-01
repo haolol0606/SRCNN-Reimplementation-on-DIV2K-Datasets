@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import os
 import torchvision.transforms as transforms
 from torchvision.transforms import InterpolationMode
-from utils import calc_psnr, convert_rgb_to_y
+from Training.utils import calc_psnr, convert_rgb_to_y
 
 # Define the SRCNN Model
 class SRCNN(nn.Module):
@@ -28,7 +28,7 @@ class SRCNN(nn.Module):
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 model = SRCNN().to(device)
-model.load_state_dict(torch.load("D:/10 Epoch/SRCNN New/Output2/output/x3/epoch_4856.pth", map_location=device))
+model.load_state_dict(torch.load("D:/10 Epoch/SRCNN New/Output(Improved)/x3/epoch_6.pth", map_location=device))
 model.eval()
 
 def load_hr_image(image_path):
@@ -90,7 +90,7 @@ hr_paths = [
     "D:/10 Epoch/SRCNN_train/SRCNN/Test/Set14/zebra.bmp",
 ]
 
-output_dir = "D:/10 Epoch/SRCNN New/Outputs/output/x3/Image"
+output_dir = "D:/10 Epoch/SRCNN New/Output(Improved)/x3/Image"
 os.makedirs(output_dir, exist_ok=True)
 
 scale_factor = 3

@@ -8,6 +8,7 @@ Move Image.py
 # Dataset and Output
 Datasets/
 Output/
+Output(Improved)/
 
 # OS files
 .DS_Store

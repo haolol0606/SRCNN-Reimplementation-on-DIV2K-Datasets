@@ -9,6 +9,7 @@ import glob
 import PIL.Image as pil_image
 import random
 import torchvision.transforms.functional as TF
+from torchvision.models import VGG19_Weights
 from torch import nn
 from torch.utils.data import Dataset
 from torch.utils.data.dataloader import DataLoader
@@ -20,59 +21,73 @@ from utils import AverageMeter, calc_psnr, convert_rgb_to_y
 
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-class SRCNNResidual(nn.Module):
+class SRCNN(nn.Module):
     def __init__(self, num_channels=3):
-        super(SRCNNResidual, self).__init__()
+        super(SRCNN, self).__init__()
         self.conv1 = nn.Conv2d(num_channels, 64, kernel_size=9, padding=4)
         self.conv2 = nn.Conv2d(64, 32, kernel_size=5, padding=2)
         self.conv3 = nn.Conv2d(32, num_channels, kernel_size=5, padding=2)
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        residual = x
         x = self.relu(self.conv1(x))
         x = self.relu(self.conv2(x))
         x = self.conv3(x)
-        return x + residual
+        return x
 
 class TrainDataset(Dataset):
-    def __init__(self, h5_file, augment=False):
+    def __init__(self, h5_file, augment=True):
         super(TrainDataset, self).__init__()
         self.h5_file = h5_file
         self.augment = augment
-        with h5py.File(h5_file, 'r') as f:  # Get length safely
+        with h5py.File(h5_file, 'r') as f:  # safely get length
             self.length = len(f['lr'])
-    
+
     def __getitem__(self, idx):
+        # Open HDF5 file once per worker
         if not hasattr(self, 'h5'):
             self.h5 = h5py.File(self.h5_file, 'r', swmr=True)
             self.lr = self.h5['lr']
             self.hr = self.h5['hr']
+
         lr = self.lr[idx]
         hr = self.hr[idx]
 
-        # ----------------- Data Augmentation -----------------
+        # Ensure contiguous arrays to avoid negative stride issues
+        lr = np.ascontiguousarray(lr, dtype=np.float32)
+        hr = np.ascontiguousarray(hr, dtype=np.float32)
+
+        # --- Data Augmentation ---
         if self.augment:
             # Random horizontal flip
             if random.random() > 0.5:
                 lr = np.flip(lr, axis=1)
                 hr = np.flip(hr, axis=1)
+
             # Random vertical flip
             if random.random() > 0.5:
                 lr = np.flip(lr, axis=0)
                 hr = np.flip(hr, axis=0)
-            # Random 90° rotation
-            k = random.randint(0, 3)  # 0,1,2,3 times 90 degrees
-            lr = np.rot90(lr, k)
-            hr = np.rot90(hr, k)
 
-        # Convert to tensor
-        lr = torch.from_numpy(lr).permute(2, 0, 1)
-        hr = torch.from_numpy(hr).permute(2, 0, 1)
-        return lr, hr
+            # Random 90-degree rotation
+            k = random.randint(0, 3)
+            if k > 0:
+                lr = np.rot90(lr, k, axes=(0,1))
+                hr = np.rot90(hr, k, axes=(0,1))
+
+        # Ensure contiguous arrays after augmentation
+        lr = np.ascontiguousarray(lr, dtype=np.float32)
+        hr = np.ascontiguousarray(hr, dtype=np.float32)
+
+        # Convert to PyTorch tensors
+        lr_tensor = torch.from_numpy(lr).permute(2, 0, 1) / 255.0
+        hr_tensor = torch.from_numpy(hr).permute(2, 0, 1) / 255.0
+
+        return lr_tensor, hr_tensor
 
     def __len__(self):
         return self.length
+
 
 class ValDataset(Dataset):
     def __init__(self, h5_file):
@@ -80,17 +95,22 @@ class ValDataset(Dataset):
         self.h5_file = h5_file
         with h5py.File(h5_file, 'r') as f:
             self.keys = sorted(f['lr'].keys(), key=lambda x: int(x))
-    
+
     def __getitem__(self, idx):
         if not hasattr(self, 'h5'):
             self.h5 = h5py.File(self.h5_file, 'r', swmr=True)
             self.lr = self.h5['lr']
             self.hr = self.h5['hr']
+
         key = self.keys[idx]
-        lr = self.lr[key][:]
-        hr = self.hr[key][:]
-        return torch.from_numpy(lr).permute(2, 0, 1), torch.from_numpy(hr).permute(2, 0, 1)
-    
+        lr = np.ascontiguousarray(self.lr[key][:], dtype=np.float32)
+        hr = np.ascontiguousarray(self.hr[key][:], dtype=np.float32)
+
+        lr_tensor = torch.from_numpy(lr).permute(2, 0, 1)
+        hr_tensor = torch.from_numpy(hr).permute(2, 0, 1)
+
+        return lr_tensor, hr_tensor
+
     def __len__(self):
         return len(self.keys)
 
@@ -190,7 +210,7 @@ def weights_init(m):
 class VGGFeatureExtractor(nn.Module):
     def __init__(self, layer='relu2_2', use_input_norm=True):
         super().__init__()
-        vgg19 = models.vgg19(pretrained=True).features
+        vgg19 = models.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features
         self.use_input_norm = use_input_norm
         self.mean = torch.tensor([0.485, 0.456, 0.406]).view(1,3,1,1)
         self.std = torch.tensor([0.229, 0.224, 0.225]).view(1,3,1,1)
@@ -214,9 +234,9 @@ class Args:
     train_lr_dir = 'D:/10 Epoch/SRCNN New/Datasets/DIV2K_train_LR_bicubic/X3_resized'
     val_hr_dir ='D:/10 Epoch/SRCNN New/Datasets/DIV2K_valid_HR'
     val_lr_dir = 'D:/10 Epoch/SRCNN New/Datasets/DIV2K_valid_LR_bicubic/X3_resized'
-    train_file = 'D:/10 Epoch/SRCNN New/Outputs/train.h5'
-    eval_file = 'D:/10 Epoch/SRCNN New/Outputs/eval.h5'
-    outputs_dir = 'D:/10 Epoch/SRCNN New/Output2/output'
+    train_file = 'D:/10 Epoch/SRCNN New/Output/train.h5'
+    eval_file = 'D:/10 Epoch/SRCNN New/Output/eval.h5'
+    outputs_dir = 'D:/10 Epoch/SRCNN New/Output(Improved)/'
     scale = 3
     patch_size = 33
     stride = 14
@@ -224,7 +244,7 @@ class Args:
     batch_size = 128
     num_epochs = 10000
     num_workers = 6
-    resume = 'D:/10 Epoch/SRCNN New/Output2/output/x3/checkpoint.pth'
+    resume = 'D:/10 Epoch/SRCNN New/Output(Improved)/x3/checkpoint.pth'
 
 if __name__ == '__main__':
     args = Args()
@@ -242,14 +262,14 @@ if __name__ == '__main__':
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # Initialize model and parameters
-    model = SRCNNResidual().to(device)
+    model = SRCNN().to(device)
     model = model.to(memory_format=torch.channels_last)
     vgg_extractor = VGGFeatureExtractor(layer='relu2_2').to(device)
     vgg_extractor.eval()  # Freeze
     mse_loss = nn.MSELoss()
     l1_loss = nn.L1Loss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=50, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=50)
 
     # Check whether restart or resume training
     start_epoch = 0  # Start from epoch 0 if no checkpoint
@@ -303,7 +323,7 @@ if __name__ == '__main__':
                 labels_features = vgg_extractor(labels)
 
                 # Combine losses: MSE + 0.01 * perceptual loss + 0.1 * L1
-                loss = mse_loss(preds, labels) + 0.01 * mse_loss(preds_features, labels_features) + 0.1 * l1_loss(preds, labels)
+                loss = mse_loss(preds, labels) + 0.1 * mse_loss(preds_features, labels_features) + 1.0 * l1_loss(preds, labels)
 
                 epoch_losses.update(loss.item(), len(inputs))
 
@@ -339,7 +359,9 @@ if __name__ == '__main__':
             with torch.no_grad():
                 preds = model(inputs)
                 preds = torch.clamp(preds, 0.0, 1.0)
-                val_loss = criterion(preds, labels)
+                preds_features = vgg_extractor(preds)
+                labels_features = vgg_extractor(labels)
+                val_loss = mse_loss(preds, labels) + 0.1 * mse_loss(preds_features, labels_features) + 1.0 * l1_loss(preds, labels)
                 epoch_val_loss.update(val_loss.item(), len(inputs))
 
             preds_y = convert_rgb_to_y(preds)
@@ -364,6 +386,8 @@ if __name__ == '__main__':
 
             # Stack LR, SR, HR images horizontally: (C, H, 3*W)
             image_list.append(torch.cat([lr_img, sr_img, hr_img], dim=2))
+
+        scheduler.step(epoch_psnr.avg)
 
         # Stack all collected images vertically to form a grid (5 rows, 1 column)
         if image_list:
