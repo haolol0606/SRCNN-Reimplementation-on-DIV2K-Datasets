@@ -5,8 +5,9 @@ __pycache__/
 # Ignore temporary scripts
 Move Image.py
 
-# Dataset or large files
+# Dataset and Output
 Datasets/
+Output/
 
 # OS files
 .DS_Store
@@ -14,4 +15,3 @@ Thumbs.db
 
 # Environment
 srcnn_env/
-
