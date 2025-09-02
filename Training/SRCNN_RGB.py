@@ -270,9 +270,6 @@ if __name__ == '__main__':
         # Log training loss to TensorBoard
         writer.add_scalar('Loss/train', epoch_losses.avg, epoch)
 
-        # Save model for each epoch
-        torch.save(model.state_dict(), os.path.join(args.outputs_dir, 'epoch_{}.pth'.format(epoch)))
-
         # === Validation Phase (Calculate Validation Loss & PSNR) ===
         model.eval()
         epoch_psnr = AverageMeter()
@@ -330,7 +327,8 @@ if __name__ == '__main__':
         writer.add_scalar('PSNR/eval', epoch_psnr.avg, epoch)
         writer.add_scalar('Loss/val', epoch_val_loss.avg, epoch)
 
-        # Save a Checkpoint
+        # === Save checkpoints ===
+        # Always save "last.pth"
         checkpoint = {
             "epoch": epoch,
             "model": model.state_dict(),
@@ -339,12 +337,14 @@ if __name__ == '__main__':
         }
         torch.save(checkpoint, os.path.join(args.outputs_dir, 'checkpoint.pth'))
 
-        # Early Stopping Check
+        # Save "best.pth" only if PSNR improves
         if epoch_psnr.avg > best_psnr:
             best_psnr = epoch_psnr.avg
             best_epoch = epoch
             best_weights = copy.deepcopy(model.state_dict())
-            no_improve_epochs = 0  # Reset counter if PSNR improves
+            no_improve_epochs = 0
+            torch.save(model.state_dict(), os.path.join(args.outputs_dir, 'best.pth'))
+            print(f"Saved new best model (epoch {epoch}, PSNR {best_psnr:.4f})")
         else:
             no_improve_epochs += 1
 

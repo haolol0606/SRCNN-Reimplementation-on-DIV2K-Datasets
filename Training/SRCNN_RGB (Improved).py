@@ -289,7 +289,7 @@ class Args:
     batch_size = 64
     num_epochs = 10000
     num_workers = 6
-    resume = 'D:/10 Epoch/SRCNN New/Output(Improved)/x3/last.pth'
+    resume = 'D:/10 Epoch/SRCNN New/Output(Improved)/x3/checkpoint.pth'
 
 if __name__ == '__main__':
     args = Args()
@@ -430,7 +430,7 @@ if __name__ == '__main__':
             "optimizer": optimizer.state_dict(),
             "best_psnr": best_psnr
         }
-        torch.save(checkpoint, os.path.join(args.outputs_dir, 'last.pth'))
+        torch.save(checkpoint, os.path.join(args.outputs_dir, 'checkpoint.pth'))
 
         # Save "best.pth" only if PSNR improves
         if epoch_psnr.avg > best_psnr:
@@ -442,6 +442,10 @@ if __name__ == '__main__':
             print(f"Saved new best model (epoch {epoch}, PSNR {best_psnr:.4f})")
         else:
             no_improve_epochs += 1
+        
+        #if no_improve_epochs >= patience:
+            #print(f"Early stopping triggered after {epoch} epochs. Best PSNR: {best_psnr:.4f} at epoch {best_epoch}.")
+            #break  # Stop training
         
     writer.close()
     print('best epoch: {}, psnr: {:.4f}'.format(best_epoch, best_psnr))

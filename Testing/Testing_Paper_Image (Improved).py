@@ -15,25 +15,24 @@ from Training import utils
 from Training.utils import calc_psnr, convert_rgb_to_y
 
 # Define the SRCNN Model
-class SRCNN(nn.Module):
+class SRCNNResidual(nn.Module):
     def __init__(self, num_channels=3):
-        super(SRCNN, self).__init__()
-        self.conv1 = nn.Conv2d(num_channels, 64, kernel_size=9, padding=4)
-        self.conv2 = nn.Conv2d(64, 32, kernel_size=5, padding=2)
-        self.conv3 = nn.Conv2d(32, num_channels, kernel_size=5, padding=2)
-        self.relu = nn.ReLU(inplace=True)
-
+        super().__init__()
+        self.body = nn.Sequential(
+            nn.Conv2d(num_channels, 64, 9, padding=4),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 32, 5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, num_channels, 5, padding=2),
+        )
     def forward(self, x):
-        x = self.relu(self.conv1(x))
-        x = self.relu(self.conv2(x))
-        x = self.conv3(x)
-        return x
+        return x + self.body(x)   # residual add
 
 # Load trained SRCNN model
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-model = SRCNN().to(device)
-model.load_state_dict(torch.load("D:/10 Epoch/SRCNN New/Output/x3/best.pth", map_location=device))
+model = SRCNNResidual().to(device)
+model.load_state_dict(torch.load("D:/10 Epoch/SRCNN New/Output(Improved)/x3/best.pth", map_location=device))
 model.eval()
 
 def load_hr_image(image_path):
