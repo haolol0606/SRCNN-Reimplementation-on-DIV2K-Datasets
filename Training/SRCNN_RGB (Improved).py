@@ -21,19 +21,18 @@ from utils import AverageMeter, calc_psnr, convert_rgb_to_y
 
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-class SRCNN(nn.Module):
+class SRCNNResidual(nn.Module):
     def __init__(self, num_channels=3):
-        super(SRCNN, self).__init__()
-        self.conv1 = nn.Conv2d(num_channels, 64, kernel_size=9, padding=4)
-        self.conv2 = nn.Conv2d(64, 32, kernel_size=5, padding=2)
-        self.conv3 = nn.Conv2d(32, num_channels, kernel_size=5, padding=2)
-        self.relu = nn.ReLU(inplace=True)
-
+        super().__init__()
+        self.body = nn.Sequential(
+            nn.Conv2d(num_channels, 64, 9, padding=4),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 32, 5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, num_channels, 5, padding=2),
+        )
     def forward(self, x):
-        x = self.relu(self.conv1(x))
-        x = self.relu(self.conv2(x))
-        x = self.conv3(x)
-        return x
+        return x + self.body(x)   # residual add
 
 class TrainDataset(Dataset):
     def __init__(self, h5_file, augment=True):
@@ -80,8 +79,8 @@ class TrainDataset(Dataset):
         hr = np.ascontiguousarray(hr, dtype=np.float32)
 
         # Convert to PyTorch tensors
-        lr_tensor = torch.from_numpy(lr).permute(2, 0, 1) / 255.0
-        hr_tensor = torch.from_numpy(hr).permute(2, 0, 1) / 255.0
+        lr_tensor = torch.from_numpy(lr).permute(2, 0, 1)
+        hr_tensor = torch.from_numpy(hr).permute(2, 0, 1)
 
         return lr_tensor, hr_tensor
 
@@ -207,27 +206,31 @@ def weights_init(m):
         if m.bias is not None:
             nn.init.constant_(m.bias, 0)
 
-class VGGFeatureExtractor(nn.Module):
-    def __init__(self, layer='relu2_2', use_input_norm=True):
-        super().__init__()
-        vgg19 = models.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features
-        self.use_input_norm = use_input_norm
-        self.mean = torch.tensor([0.485, 0.456, 0.406]).view(1,3,1,1)
-        self.std = torch.tensor([0.229, 0.224, 0.225]).view(1,3,1,1)
-
-        # Extract layers up to relu2_2
-        self.vgg_layers = nn.Sequential()
-        layer_dict = {'relu1_1':1, 'relu1_2':3, 'relu2_1':6, 'relu2_2':8}
-        for i in range(layer_dict[layer]+1):
-            self.vgg_layers.add_module(str(i), vgg19[i])
-        # Freeze VGG parameters
-        for param in self.vgg_layers.parameters():
-            param.requires_grad = False
-
-    def forward(self, x):
-        if self.use_input_norm:
-            x = (x - self.mean.to(x.device)) / self.std.to(x.device)
-        return self.vgg_layers(x)
+def tta_x8_forward(model, x):
+    # x: BCHW
+    aug = [lambda z:z,
+           lambda z:torch.flip(z,[2]),
+           lambda z:torch.flip(z,[3]),
+           lambda z:torch.rot90(z,1,[2,3]),
+           lambda z:torch.rot90(z,2,[2,3]),
+           lambda z:torch.rot90(z,3,[2,3]),
+           lambda z:torch.flip(torch.rot90(z,1,[2,3]), [2]),
+           lambda z:torch.flip(torch.rot90(z,1,[2,3]), [3])]
+    deaug = [
+        lambda z:z,
+        lambda z:torch.flip(z,[2]),
+        lambda z:torch.flip(z,[3]),
+        lambda z:torch.rot90(z,-1,[2,3]),
+        lambda z:torch.rot90(z,-2,[2,3]),
+        lambda z:torch.rot90(z,-3,[2,3]),
+        lambda z:torch.rot90(torch.flip(z,[2]), -1, [2,3]),
+        lambda z:torch.rot90(torch.flip(z,[3]), -1, [2,3]),
+    ]
+    ys = []
+    for a, d in zip(aug, deaug):
+        y = model(a(x))
+        ys.append(d(y))
+    return torch.mean(torch.stack(ys, dim=0), dim=0)
 
 def log_images_with_patch(writer, inputs, preds, labels, epoch, patch_size=50, scale=3, max_images=5):
     image_list = []
@@ -280,13 +283,13 @@ class Args:
     eval_file = 'D:/10 Epoch/SRCNN New/Output/eval.h5'
     outputs_dir = 'D:/10 Epoch/SRCNN New/Output(Improved)/'
     scale = 3
-    patch_size = 33
+    patch_size = 41
     stride = 14
     lr = 1e-4
-    batch_size = 128
+    batch_size = 64
     num_epochs = 10000
     num_workers = 6
-    resume = 'D:/10 Epoch/SRCNN New/Output(Improved)/x3/checkpoint.pth'
+    resume = 'D:/10 Epoch/SRCNN New/Output(Improved)/x3/last.pth'
 
 if __name__ == '__main__':
     args = Args()
@@ -304,28 +307,25 @@ if __name__ == '__main__':
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # Initialize model and parameters
-    model = SRCNN().to(device)
+    model = SRCNNResidual().to(device)
     model = model.to(memory_format=torch.channels_last)
-    vgg_extractor = VGGFeatureExtractor(layer='relu2_2').to(device)
-    vgg_extractor.eval()  # Freeze
     mse_loss = nn.MSELoss()
-    l1_loss = nn.L1Loss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=50)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=20)
 
     # Check whether restart or resume training
-    start_epoch = 0  # Start from epoch 0 if no checkpoint
     if args.resume and os.path.exists(args.resume):
         print(f"Resuming training from checkpoint: {args.resume}")
         checkpoint = torch.load(args.resume, map_location=device)
-
-        model.load_state_dict(checkpoint["model"])  # Load model weights
-        #optimizer.load_state_dict(checkpoint["optimizer"])  # Restore optimizer state
-        start_epoch = checkpoint["epoch"] + 1  # Resume from next epoch
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        start_epoch = checkpoint["epoch"] + 1
         best_psnr = checkpoint["best_psnr"]
         print(f"Resumed from epoch {start_epoch}, best PSNR: {best_psnr:.4f}")
     else:
-        model.apply(weights_init)  # Initialize model if no checkpoint
+        model.apply(weights_init)
+        best_psnr = 0.0
+        start_epoch = 0
 
     train_dataset = TrainDataset(args.train_file, augment=True)
     train_dataloader = DataLoader(dataset=train_dataset,
@@ -361,16 +361,15 @@ if __name__ == '__main__':
                 labels = labels.to(memory_format=torch.channels_last)
 
                 preds = model(inputs)
-                preds_features = vgg_extractor(preds)
-                labels_features = vgg_extractor(labels)
 
-                # Combine losses: MSE + 0.01 * perceptual loss + 0.1 * L1
-                loss = mse_loss(preds, labels) + 0.1 * mse_loss(preds_features, labels_features) + 1.0 * l1_loss(preds, labels)
+                # Calculate loss
+                loss = mse_loss(preds, labels)
 
                 epoch_losses.update(loss.item(), len(inputs))
 
                 optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
                 optimizer.step()
 
                 t.set_postfix(loss='{:.6f}'.format(epoch_losses.avg))
@@ -378,9 +377,6 @@ if __name__ == '__main__':
 
         # Log training loss to TensorBoard
         writer.add_scalar('Loss/train', epoch_losses.avg, epoch)
-
-        # Save model for each epoch
-        torch.save(model.state_dict(), os.path.join(args.outputs_dir, 'epoch_{}.pth'.format(epoch)))
 
         # === Validation Phase (Calculate Validation Loss & PSNR) ===
         model.eval()
@@ -399,11 +395,9 @@ if __name__ == '__main__':
             labels = labels.to(device)
 
             with torch.no_grad():
-                preds = model(inputs)
+                preds = tta_x8_forward(model, inputs)
                 preds = torch.clamp(preds, 0.0, 1.0)
-                preds_features = vgg_extractor(preds)
-                labels_features = vgg_extractor(labels)
-                val_loss = mse_loss(preds, labels) + 0.1 * mse_loss(preds_features, labels_features) + 1.0 * l1_loss(preds, labels)
+                val_loss = mse_loss(preds, labels)
                 epoch_val_loss.update(val_loss.item(), len(inputs))
 
             preds_y = convert_rgb_to_y(preds)
@@ -413,7 +407,12 @@ if __name__ == '__main__':
 
             epoch_psnr.update(calc_psnr(preds_y, labels_y, max_val=1.0), len(inputs))
 
+        # Update LR scheduler
         scheduler.step(epoch_psnr.avg)
+
+        # Log current learning rate
+        current_lr = optimizer.param_groups[0]['lr']
+        writer.add_scalar("LR", current_lr, epoch)
 
         log_images_with_patch(writer, inputs, preds, labels, epoch, patch_size=50, scale=3)
         print('eval psnr: {:.4f}'.format(epoch_psnr.avg))
@@ -423,27 +422,26 @@ if __name__ == '__main__':
         writer.add_scalar('PSNR/eval', epoch_psnr.avg, epoch)
         writer.add_scalar('Loss/val', epoch_val_loss.avg, epoch)
 
-        # Save a Checkpoint
+        # === Save checkpoints ===
+        # Always save "last.pth"
         checkpoint = {
             "epoch": epoch,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "best_psnr": best_psnr
         }
-        torch.save(checkpoint, os.path.join(args.outputs_dir, 'checkpoint.pth'))
+        torch.save(checkpoint, os.path.join(args.outputs_dir, 'last.pth'))
 
-        # Early Stopping Check
+        # Save "best.pth" only if PSNR improves
         if epoch_psnr.avg > best_psnr:
             best_psnr = epoch_psnr.avg
             best_epoch = epoch
             best_weights = copy.deepcopy(model.state_dict())
-            no_improve_epochs = 0  # Reset counter if PSNR improves
+            no_improve_epochs = 0
+            torch.save(model.state_dict(), os.path.join(args.outputs_dir, 'best.pth'))
+            print(f"Saved new best model (epoch {epoch}, PSNR {best_psnr:.4f})")
         else:
             no_improve_epochs += 1
-
-        #if no_improve_epochs >= patience:
-            #print(f"Early stopping triggered after {epoch} epochs. Best PSNR: {best_psnr:.4f} at epoch {best_epoch}.")
-            #break  # Stop training
         
     writer.close()
     print('best epoch: {}, psnr: {:.4f}'.format(best_epoch, best_psnr))
