@@ -9,92 +9,49 @@ import glob
 import PIL.Image as pil_image
 import random
 import torchvision.transforms.functional as TF
-from torchvision.models import VGG19_Weights
-from torchvision.utils import make_grid
 from torch import nn
 from torch.utils.data import Dataset
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
-from torchvision import models
 from tqdm import tqdm
-from utils import AverageMeter, calc_psnr, convert_rgb_to_y
+from Training.utils import AverageMeter, calc_psnr, convert_rgb_to_y
 
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-class SRCNNResidual(nn.Module):
-    def __init__(self, num_channels=3, residual_scale=0.1):
-        super(SRCNNResidual, self).__init__()
-        self.residual_scale = residual_scale
+class SRCNN(nn.Module):
+    def __init__(self, num_channels=3):
+        super(SRCNN, self).__init__()
         self.conv1 = nn.Conv2d(num_channels, 64, kernel_size=9, padding=4)
         self.conv2 = nn.Conv2d(64, 32, kernel_size=5, padding=2)
         self.conv3 = nn.Conv2d(32, num_channels, kernel_size=5, padding=2)
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        # Predict residual
-        residual = self.conv1(x)
-        residual = self.relu(residual)
-        residual = self.conv2(residual)
-        residual = self.relu(residual)
-        residual = self.conv3(residual)
-        # Add scaled residual to input
-        out = x + self.residual_scale * residual
-        return out
+        x = self.relu(self.conv1(x))
+        x = self.relu(self.conv2(x))
+        x = self.conv3(x)
+        return x
 
 class TrainDataset(Dataset):
-    def __init__(self, h5_file, augment=True):
+    def __init__(self, h5_file):
         super(TrainDataset, self).__init__()
         self.h5_file = h5_file
-        self.augment = augment
-        with h5py.File(h5_file, 'r') as f:  # safely get length
+        with h5py.File(h5_file, 'r') as f:  # Get length safely
             self.length = len(f['lr'])
-
+    
     def __getitem__(self, idx):
-        # Open HDF5 file once per worker
+        # Open file once per worker
         if not hasattr(self, 'h5'):
             self.h5 = h5py.File(self.h5_file, 'r', swmr=True)
             self.lr = self.h5['lr']
             self.hr = self.h5['hr']
-
         lr = self.lr[idx]
         hr = self.hr[idx]
-
-        # Ensure contiguous arrays to avoid negative stride issues
-        lr = np.ascontiguousarray(lr, dtype=np.float32)
-        hr = np.ascontiguousarray(hr, dtype=np.float32)
-
-        # --- Data Augmentation ---
-        if self.augment:
-            # Random horizontal flip
-            if random.random() > 0.5:
-                lr = np.flip(lr, axis=1)
-                hr = np.flip(hr, axis=1)
-
-            # Random vertical flip
-            if random.random() > 0.5:
-                lr = np.flip(lr, axis=0)
-                hr = np.flip(hr, axis=0)
-
-            # Random 90-degree rotation
-            k = random.randint(0, 3)
-            if k > 0:
-                lr = np.rot90(lr, k, axes=(0,1))
-                hr = np.rot90(hr, k, axes=(0,1))
-
-        # Ensure contiguous arrays after augmentation
-        lr = np.ascontiguousarray(lr, dtype=np.float32)
-        hr = np.ascontiguousarray(hr, dtype=np.float32)
-
-        # Convert to PyTorch tensors
-        lr_tensor = torch.from_numpy(lr).permute(2, 0, 1) / 255.0
-        hr_tensor = torch.from_numpy(hr).permute(2, 0, 1) / 255.0
-
-        return lr_tensor, hr_tensor
-
+        return torch.from_numpy(lr).permute(2, 0, 1), torch.from_numpy(hr).permute(2, 0, 1)
+    
     def __len__(self):
         return self.length
-
 
 class ValDataset(Dataset):
     def __init__(self, h5_file):
@@ -102,22 +59,17 @@ class ValDataset(Dataset):
         self.h5_file = h5_file
         with h5py.File(h5_file, 'r') as f:
             self.keys = sorted(f['lr'].keys(), key=lambda x: int(x))
-
+    
     def __getitem__(self, idx):
         if not hasattr(self, 'h5'):
             self.h5 = h5py.File(self.h5_file, 'r', swmr=True)
             self.lr = self.h5['lr']
             self.hr = self.h5['hr']
-
         key = self.keys[idx]
-        lr = np.ascontiguousarray(self.lr[key][:], dtype=np.float32)
-        hr = np.ascontiguousarray(self.hr[key][:], dtype=np.float32)
-
-        lr_tensor = torch.from_numpy(lr).permute(2, 0, 1)
-        hr_tensor = torch.from_numpy(hr).permute(2, 0, 1)
-
-        return lr_tensor, hr_tensor
-
+        lr = self.lr[key][:]
+        hr = self.hr[key][:]
+        return torch.from_numpy(lr).permute(2, 0, 1), torch.from_numpy(hr).permute(2, 0, 1)
+    
     def __len__(self):
         return len(self.keys)
 
@@ -214,70 +166,6 @@ def weights_init(m):
         if m.bias is not None:
             nn.init.constant_(m.bias, 0)
 
-class VGGFeatureExtractor(nn.Module):
-    def __init__(self, layer='relu2_2', use_input_norm=True):
-        super().__init__()
-        vgg19 = models.vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features
-        self.use_input_norm = use_input_norm
-        self.mean = torch.tensor([0.485, 0.456, 0.406]).view(1,3,1,1)
-        self.std = torch.tensor([0.229, 0.224, 0.225]).view(1,3,1,1)
-
-        # Extract layers up to relu2_2
-        self.vgg_layers = nn.Sequential()
-        layer_dict = {'relu1_1':1, 'relu1_2':3, 'relu2_1':6, 'relu2_2':8}
-        for i in range(layer_dict[layer]+1):
-            self.vgg_layers.add_module(str(i), vgg19[i])
-        # Freeze VGG parameters
-        for param in self.vgg_layers.parameters():
-            param.requires_grad = False
-
-    def forward(self, x):
-        if self.use_input_norm:
-            x = (x - self.mean.to(x.device)) / self.std.to(x.device)
-        return self.vgg_layers(x)
-    
-def log_images_with_patch(writer, inputs, preds, labels, epoch, patch_size=50, scale=3, max_images=5):
-    image_list = []
-    num_images = min(inputs.size(0), max_images)
-
-    for i in range(num_images):
-        lr_img = inputs[i].cpu()
-        sr_img = preds[i].cpu()
-        hr_img = labels[i].cpu()
-
-        # Resize full images to fixed size
-        fixed_size = (512, 512)
-        lr_img = TF.resize(lr_img.unsqueeze(0), fixed_size).squeeze(0)
-        sr_img = TF.resize(sr_img.unsqueeze(0), fixed_size).squeeze(0)
-        hr_img = TF.resize(hr_img.unsqueeze(0), fixed_size).squeeze(0)
-
-        _, h, w = lr_img.shape
-        y, x = h - patch_size, w - patch_size
-
-        # Extract patch and enlarge
-        lr_patch = TF.resize(lr_img[:, y:y+patch_size, x:x+patch_size], [patch_size*scale, patch_size*scale])
-        sr_patch = TF.resize(sr_img[:, y:y+patch_size, x:x+patch_size], [patch_size*scale, patch_size*scale])
-        hr_patch = TF.resize(hr_img[:, y:y+patch_size, x:x+patch_size], [patch_size*scale, patch_size*scale])
-
-        # Pad patch to match full image height
-        pad_height = h - lr_patch.shape[1]
-        pad_width = 0  # width can vary for horizontal concat
-        lr_patch_padded = nn.functional.pad(lr_patch, (0, 0, 0, pad_height))  # pad bottom
-        sr_patch_padded = nn.functional.pad(sr_patch, (0, 0, 0, pad_height))
-        hr_patch_padded = nn.functional.pad(hr_patch, (0, 0, 0, pad_height))
-
-        # Concatenate horizontally: full image + enlarged patch
-        lr_concat = torch.cat([lr_img, lr_patch_padded], dim=2)
-        sr_concat = torch.cat([sr_img, sr_patch_padded], dim=2)
-        hr_concat = torch.cat([hr_img, hr_patch_padded], dim=2)
-
-        # Stack vertically: LR / SR / HR
-        combined = torch.cat([lr_concat, sr_concat, hr_concat], dim=1)
-        image_list.append(combined)
-
-    grid = make_grid(image_list, nrow=1, padding=4, normalize=True)
-    writer.add_image("Comparison/LR_SR_HR_Patch", grid, epoch)
-
 class Args:
     train_hr_dir = 'D:/10 Epoch/SRCNN New/Datasets/DIV2K_train_HR'
     train_lr_dir = 'D:/10 Epoch/SRCNN New/Datasets/DIV2K_train_LR_bicubic/X3_resized'
@@ -285,15 +173,15 @@ class Args:
     val_lr_dir = 'D:/10 Epoch/SRCNN New/Datasets/DIV2K_valid_LR_bicubic/X3_resized'
     train_file = 'D:/10 Epoch/SRCNN New/Output/train.h5'
     eval_file = 'D:/10 Epoch/SRCNN New/Output/eval.h5'
-    outputs_dir = 'D:/10 Epoch/SRCNN New/Output(With Residual)/'
+    outputs_dir = 'D:/10 Epoch/SRCNN New/Output/'
     scale = 3
     patch_size = 33
     stride = 14
-    lr = 3e-4
+    lr = 1e-4
     batch_size = 128
     num_epochs = 10000
     num_workers = 6
-    resume = 'D:/10 Epoch/SRCNN New/Output(With Residual)/x3/checkpoint.pth'
+    resume = 'D:/10 Epoch/SRCNN New/Output/x3/checkpoint.pth'
 
 if __name__ == '__main__':
     args = Args()
@@ -311,14 +199,14 @@ if __name__ == '__main__':
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
     # Initialize model and parameters
-    model = SRCNNResidual().to(device)
+    model = SRCNN().to(device)
     model = model.to(memory_format=torch.channels_last)
-    vgg_extractor = VGGFeatureExtractor(layer='relu2_2').to(device)
-    vgg_extractor.eval()  # Freeze
-    mse_loss = nn.MSELoss()
-    l1_loss = nn.L1Loss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=50)
+    criterion = nn.MSELoss()
+    optimizer = optim.SGD([
+        {'params': model.conv1.parameters()},
+        {'params': model.conv2.parameters()},
+        {'params': model.conv3.parameters(), 'lr': args.lr * 0.1}
+    ], lr=args.lr, momentum=0.9)
 
     # Check whether restart or resume training
     start_epoch = 0  # Start from epoch 0 if no checkpoint
@@ -334,7 +222,7 @@ if __name__ == '__main__':
     else:
         model.apply(weights_init)  # Initialize model if no checkpoint
 
-    train_dataset = TrainDataset(args.train_file, augment=True)
+    train_dataset = TrainDataset(args.train_file)
     train_dataloader = DataLoader(dataset=train_dataset,
                                   batch_size=args.batch_size,
                                   shuffle=True,
@@ -367,33 +255,15 @@ if __name__ == '__main__':
                 inputs = inputs.to(memory_format=torch.channels_last)
                 labels = labels.to(memory_format=torch.channels_last)
 
-                # Forward pass
-                residual_pred = model.conv1(inputs)
-                residual_pred = model.relu(residual_pred)
-                residual_pred = model.conv2(residual_pred)
-                residual_pred = model.relu(residual_pred)
-                residual_pred = model.conv3(residual_pred)
-                
-                # Scaled residual added to input
-                outputs = inputs + model.residual_scale * residual_pred
+                preds = model(inputs)
+                loss = criterion(preds, labels)
 
-                # Compute true residual
-                residual_gt = labels - inputs
-
-                # Log residual magnitude (mean absolute value)
-                residual_magnitude = residual_pred.abs().mean().item()
-                writer.add_scalar('Residual/avg_magnitude', residual_magnitude, epoch)
-
-                # Loss computed on residual prediction (instead of full image)
-                loss = mse_loss(residual_pred, residual_gt) + 0.1 * mse_loss(
-                    vgg_extractor(outputs), vgg_extractor(labels)
-                ) + l1_loss(residual_pred, residual_gt)
+                epoch_losses.update(loss.item(), len(inputs))
 
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
-                epoch_losses.update(loss.item(), inputs.size(0))
                 t.set_postfix(loss='{:.6f}'.format(epoch_losses.avg))
                 t.update(len(inputs))
 
@@ -422,9 +292,7 @@ if __name__ == '__main__':
             with torch.no_grad():
                 preds = model(inputs)
                 preds = torch.clamp(preds, 0.0, 1.0)
-                preds_features = vgg_extractor(preds)
-                labels_features = vgg_extractor(labels)
-                val_loss = mse_loss(preds, labels) + 0.1 * mse_loss(preds_features, labels_features) + 1.0 * l1_loss(preds, labels)
+                val_loss = criterion(preds, labels)
                 epoch_val_loss.update(val_loss.item(), len(inputs))
 
             preds_y = convert_rgb_to_y(preds)
@@ -434,9 +302,27 @@ if __name__ == '__main__':
 
             epoch_psnr.update(calc_psnr(preds_y, labels_y, max_val=1.0), len(inputs))
 
-        scheduler.step(epoch_psnr.avg)
+            # Select the first image from the batch
+            lr_img = inputs[0].float()
+            sr_img = preds[0].float()
+            hr_img = labels[0].float()
 
-        log_images_with_patch(writer, inputs, preds, labels, epoch, patch_size=50, scale=3)
+            # Define a fixed size (H, W) for all images
+            fixed_size = (512, 512)
+
+            # Resize LR, SR, and HR images to 512x512
+            lr_img = TF.resize(lr_img.unsqueeze(0), fixed_size).squeeze(0)
+            sr_img = TF.resize(sr_img.unsqueeze(0), fixed_size).squeeze(0)
+            hr_img = TF.resize(hr_img.unsqueeze(0), fixed_size).squeeze(0)
+
+            # Stack LR, SR, HR images horizontally: (C, H, 3*W)
+            image_list.append(torch.cat([lr_img, sr_img, hr_img], dim=2))
+
+        # Stack all collected images vertically to form a grid (5 rows, 1 column)
+        if image_list:
+            grid = make_grid(image_list, nrow=1, padding=2, normalize=True)  # 1 row, multiple images stacked vertically
+            writer.add_image("Comparison/LR_SR_HR", grid, epoch)
+
         print('eval psnr: {:.4f}'.format(epoch_psnr.avg))
         print('validation loss: {:.4f}'.format(epoch_val_loss.avg))
 

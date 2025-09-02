@@ -6,7 +6,12 @@ import PIL.Image as pil_image
 import matplotlib.pyplot as plt
 import os
 import torchvision.transforms as transforms
+import sys
+
+# go one folder up (to project root)
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from torchvision.transforms import InterpolationMode
+from Training import utils
 from Training.utils import calc_psnr, convert_rgb_to_y
 
 # Define the SRCNN Model
@@ -28,7 +33,7 @@ class SRCNN(nn.Module):
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 model = SRCNN().to(device)
-model.load_state_dict(torch.load("D:/10 Epoch/SRCNN New/Output(Improved)/x3/epoch_6.pth", map_location=device))
+model.load_state_dict(torch.load("D:/10 Epoch/SRCNN New/Output(Improved)/x3/epoch_21.pth", map_location=device))
 model.eval()
 
 def load_hr_image(image_path):
