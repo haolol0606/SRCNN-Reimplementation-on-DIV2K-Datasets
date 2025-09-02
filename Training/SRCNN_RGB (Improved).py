@@ -228,7 +228,49 @@ class VGGFeatureExtractor(nn.Module):
         if self.use_input_norm:
             x = (x - self.mean.to(x.device)) / self.std.to(x.device)
         return self.vgg_layers(x)
-    
+
+def log_images_with_patch(writer, inputs, preds, labels, epoch, patch_size=50, scale=3, max_images=5):
+    image_list = []
+    num_images = min(inputs.size(0), max_images)
+
+    for i in range(num_images):
+        lr_img = inputs[i].cpu()
+        sr_img = preds[i].cpu()
+        hr_img = labels[i].cpu()
+
+        # Resize full images to fixed size
+        fixed_size = (512, 512)
+        lr_img = TF.resize(lr_img.unsqueeze(0), fixed_size).squeeze(0)
+        sr_img = TF.resize(sr_img.unsqueeze(0), fixed_size).squeeze(0)
+        hr_img = TF.resize(hr_img.unsqueeze(0), fixed_size).squeeze(0)
+
+        _, h, w = lr_img.shape
+        y, x = h - patch_size, w - patch_size
+
+        # Extract patch and enlarge
+        lr_patch = TF.resize(lr_img[:, y:y+patch_size, x:x+patch_size], [patch_size*scale, patch_size*scale])
+        sr_patch = TF.resize(sr_img[:, y:y+patch_size, x:x+patch_size], [patch_size*scale, patch_size*scale])
+        hr_patch = TF.resize(hr_img[:, y:y+patch_size, x:x+patch_size], [patch_size*scale, patch_size*scale])
+
+        # Pad patch to match full image height
+        pad_height = h - lr_patch.shape[1]
+        pad_width = 0  # width can vary for horizontal concat
+        lr_patch_padded = nn.functional.pad(lr_patch, (0, 0, 0, pad_height))  # pad bottom
+        sr_patch_padded = nn.functional.pad(sr_patch, (0, 0, 0, pad_height))
+        hr_patch_padded = nn.functional.pad(hr_patch, (0, 0, 0, pad_height))
+
+        # Concatenate horizontally: full image + enlarged patch
+        lr_concat = torch.cat([lr_img, lr_patch_padded], dim=2)
+        sr_concat = torch.cat([sr_img, sr_patch_padded], dim=2)
+        hr_concat = torch.cat([hr_img, hr_patch_padded], dim=2)
+
+        # Stack vertically: LR / SR / HR
+        combined = torch.cat([lr_concat, sr_concat, hr_concat], dim=1)
+        image_list.append(combined)
+
+    grid = make_grid(image_list, nrow=1, padding=4, normalize=True)
+    writer.add_image("Comparison/LR_SR_HR_Patch", grid, epoch)
+
 class Args:
     train_hr_dir = 'D:/10 Epoch/SRCNN New/Datasets/DIV2K_train_HR'
     train_lr_dir = 'D:/10 Epoch/SRCNN New/Datasets/DIV2K_train_LR_bicubic/X3_resized'
@@ -371,29 +413,9 @@ if __name__ == '__main__':
 
             epoch_psnr.update(calc_psnr(preds_y, labels_y, max_val=1.0), len(inputs))
 
-            # Select the first image from the batch
-            lr_img = inputs[0].float()
-            sr_img = preds[0].float()
-            hr_img = labels[0].float()
-
-            # Define a fixed size (H, W) for all images
-            fixed_size = (512, 512)
-
-            # Resize LR, SR, and HR images to 512x512
-            lr_img = TF.resize(lr_img.unsqueeze(0), fixed_size).squeeze(0)
-            sr_img = TF.resize(sr_img.unsqueeze(0), fixed_size).squeeze(0)
-            hr_img = TF.resize(hr_img.unsqueeze(0), fixed_size).squeeze(0)
-
-            # Stack LR, SR, HR images horizontally: (C, H, 3*W)
-            image_list.append(torch.cat([lr_img, sr_img, hr_img], dim=2))
-
         scheduler.step(epoch_psnr.avg)
 
-        # Stack all collected images vertically to form a grid (5 rows, 1 column)
-        if image_list:
-            grid = make_grid(image_list, nrow=1, padding=2, normalize=True)  # 1 row, multiple images stacked vertically
-            writer.add_image("Comparison/LR_SR_HR", grid, epoch)
-
+        log_images_with_patch(writer, inputs, preds, labels, epoch, patch_size=50, scale=3)
         print('eval psnr: {:.4f}'.format(epoch_psnr.avg))
         print('validation loss: {:.4f}'.format(epoch_val_loss.avg))
 
