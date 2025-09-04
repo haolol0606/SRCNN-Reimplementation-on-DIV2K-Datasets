@@ -63,7 +63,7 @@ def extract_patch(image_tensor, position='left-bottom', size=50, scale=3):
     enlarged_patch = TF.resize(patch, [size * scale, size * scale], interpolation=InterpolationMode.BICUBIC)
     return patch, enlarged_patch
 
-def show_images_combined(image_data):
+def show_images_combined(image_data, save_path=None):
     num_images = len(image_data)
     fig, axes = plt.subplots(num_images, 6, figsize=(16, 10))
     plt.subplots_adjust(wspace=0.5, hspace=1.0) 
@@ -87,6 +87,11 @@ def show_images_combined(image_data):
             ax.axis("off")
 
     plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Saved combined image to {save_path}")
+    
     plt.show(block=True)
 
 hr_paths = [
@@ -95,7 +100,7 @@ hr_paths = [
     "D:/10 Epoch/SRCNN_train/SRCNN/Test/Set14/zebra.bmp",
 ]
 
-output_dir = "D:/10 Epoch/SRCNN New/Output(Improved)/x3/Image"
+output_dir = "D:/10 Epoch/SRCNN New/Output/x3/Image"
 os.makedirs(output_dir, exist_ok=True)
 
 scale_factor = 3
@@ -133,4 +138,5 @@ for i, hr_path in enumerate(hr_paths):
                         hr_patch_enlarged.permute(1, 2, 0).cpu().numpy(),
                         lr_psnr, sr_psnr))
 
-show_images_combined(image_data)
+save_combined_path = os.path.join(output_dir, "srcnn_baseline.png")
+show_images_combined(image_data, save_path=save_combined_path)

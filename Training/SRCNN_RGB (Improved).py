@@ -325,6 +325,7 @@ if __name__ == '__main__':
     else:
         model.apply(weights_init)
         best_psnr = 0.0
+        best_epoch = 0
         start_epoch = 0
 
     train_dataset = TrainDataset(args.train_file, augment=True)
@@ -340,8 +341,6 @@ if __name__ == '__main__':
     val_dataloader = DataLoader(dataset=val_dataset, batch_size=1)
 
     best_weights = copy.deepcopy(model.state_dict())
-    best_epoch = 0
-    best_psnr = 0.0
     patience = 100  
     no_improve_epochs = 0  
     writer = SummaryWriter(log_dir=args.outputs_dir)
